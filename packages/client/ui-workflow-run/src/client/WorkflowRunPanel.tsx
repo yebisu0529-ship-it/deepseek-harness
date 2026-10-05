@@ -3,14 +3,16 @@ import {
   type FocusEvent, type MouseEvent, type ReactNode,
 } from 'react'
 import {
-  DisclosureRow, IconChevronRightOutlineRegular, StateDot,
+  Button, DisclosureRow, IconChevronRightOutlineRegular, StateDot,
   type DisclosureRowProps, type StateDotState,
 } from '@deepseek-ai/dsh-client-ui-primitives'
-import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import type { SessionListState, SessionTarget } from '@deepseek-ai/dsh-api-session-controller/client'
+import type { PropsLocale, PropsRuntime, PropsStore } from '@deepseek-ai/dsh-client-ui-slots'
+import type { SessionTarget } from '@deepseek-ai/dsh-api-session-controller/client'
 import { shallowEqual } from '@deepseek-ai/dsh-client-store'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
-import type { SessionStatusSnapshot } from '@deepseek-ai/dsh-client-ui-session/client'
+import { navigableMembers } from './navigation.ts'
+import type { createWorkflowBoardStore } from './board-store.ts'
+import { WorkflowBoard } from './WorkflowBoard.tsx'
 import type { WorkflowRunKey } from './locales.ts'
 import type {
   WorkflowRunMemberData, WorkflowRunPhaseData, WorkflowRunStatus,
@@ -20,6 +22,7 @@ import css from './WorkflowRunPanel.module.css'
 /** Navigation action injected from the plugin's own Session Controller access. */
 export interface WorkflowRunInjected {
   readonly openSession: (target: SessionTarget) => void
+  readonly openBoard: () => void
 }
 
 /** Complete keyed Chat renderer props. */
@@ -27,6 +30,7 @@ export type WorkflowRunPanelProps =
   PropsRuntime<'conversation.chat.node', 'workflow-run'>
   & PropsLocale<'workflowRun'>
   & WorkflowRunInjected
+  & PropsStore<ReturnType<typeof createWorkflowBoardStore>>
 
 const STATUS_KEYS = {
   running: 'status.running',
@@ -180,26 +184,6 @@ function phaseStatusSummary(members: readonly WorkflowRunMemberData[], t: Workfl
   return visible.map(status => statusCount(status, count(status), t)).join(' · ')
 }
 
-function navigableMembers(
-  sessions: SessionListState,
-  phases: readonly WorkflowRunPhaseData[],
-  parentId: SessionId,
-  statuses: SessionStatusSnapshot,
-): readonly SessionId[] {
-  const catalog = sessions.projectionsBySession[parentId]
-  const result: SessionId[] = []
-  for (const phase of phases) {
-    for (const member of phase.members) {
-      const child = catalog?.values.subagentCatalog?.find(entry => entry.id === member.childId)
-      if (member.status === 'running'
-        && child !== undefined && (statuses.get(child.id)?.running ?? sessions.byId[child.id]?.running) === true) {
-        result.push(member.childId)
-      }
-    }
-  }
-  return result
-}
-
 function RunHeader({ children, count, name, onToggle, open, status, t }: {
   readonly children: ReactNode
   readonly count: number
@@ -340,7 +324,9 @@ function PhaseSection({
 }
 
 /** Render one durable workflow run with status-driven run and phase disclosure. */
-export function WorkflowRunPanel({ node, sessionId, useSessions, useSessionStatus, openSession, t }: WorkflowRunPanelProps) {
+export function WorkflowRunPanel({ node, sessionId, useSessions, useSessionStatus, openSession, openBoard, actions, t }: WorkflowRunPanelProps) {
+  const [boardOpen, setBoardOpen] = useState(false)
+  const boardToggleRef = useRef<HTMLButtonElement>(null)
   const phaseFacts = useMemo(() => node.data.phases.map(phase => (
     [phase.key, phaseDisclosureFacts(phase)] as const
   )), [node.data.phases])
@@ -441,6 +427,20 @@ export function WorkflowRunPanel({ node, sessionId, useSessions, useSessionStatu
         ? preventPendingHeaderFocus
         : undefined}
     >
+      <div className={css.boardToolbar}>
+        <Button ref={boardToggleRef} size="sm" variant="ghost" aria-expanded={boardOpen}
+          onClick={() => { setBoardOpen(value => !value) }}>{t('board.title')}</Button>
+        <Button size="sm" variant="ghost"
+          onClick={() => { actions.select(node.key); openBoard() }}>{t('board.side')}</Button>
+      </div>
+      {boardOpen && <div onKeyDown={event => {
+        if (event.key !== 'Escape' || event.nativeEvent.isComposing) return
+        event.stopPropagation()
+        setBoardOpen(false)
+        boardToggleRef.current?.focus()
+      }}><WorkflowBoard runId={node.id} data={node.data}
+        sessionId={sessionId} useSessions={useSessions} useSessionStatus={useSessionStatus}
+        openSession={openSession} t={t} /></div>}
       <RunHeader
         count={totalMembers}
         name={node.data.name}

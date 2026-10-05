@@ -1,0 +1,88 @@
+.board {
+  min-width: 0;
+  color: var(--dsw-alias-label-secondary);
+  font-size: var(--dsh-content-font-size-secondary, 13px);
+  line-height: calc(20px + var(--dsh-content-font-delta-secondary, 0px));
+}
+
+.progress {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+}
+
+.progress progress {
+  width: 120px;
+  max-width: 100%;
+  accent-color: var(--dsw-alias-state-business-primary);
+}
+
+.columns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr));
+  gap: 8px;
+}
+
+.column {
+  min-width: 0;
+  padding: 8px;
+  border-radius: var(--dsw-radius-md);
+  background: var(--dsw-alias-bg-module-platform);
+}
+
+.column h3 {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0 0 8px;
+  font-size: inherit;
+  font-weight: 500;
+}
+
+.card {
+  min-width: 0;
+  margin-top: 8px;
+  padding: 8px;
+  border: 0.5px solid var(--dsw-alias-border-l4);
+  border-radius: var(--dsw-radius-sm);
+}
+
+.card dl { margin: 0; }
+.card:focus-visible {
+  outline: var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color);
+  outline-offset: 2px;
+}
+.card dt { margin-top: 4px; }
+.card dd {
+  margin: 0;
+  color: var(--dsw-alias-label-primary);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.link {
+  color: var(--dsw-alias-link);
+  font-weight: 500;
+}
+
+.link:hover,
+.link:focus-visible {
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+}
+
+.sidebar {
+  box-sizing: border-box;
+  height: 100%;
+  overflow: auto;
+  min-width: 0;
+  padding: 12px;
+}
+
+.sidebar h2 {
+  font-size: var(--dsh-content-font-size, 14px);
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}

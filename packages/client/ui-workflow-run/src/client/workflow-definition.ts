@@ -108,7 +108,7 @@ function projectWorkflow(
       label: member.label,
       childId: member.childId,
       status: member.outcome === undefined
-        ? interrupted ? 'interrupted' : 'running'
+        ? interrupted || state.stopReason !== undefined ? 'interrupted' : 'running'
         : statusFromOutcome(member.outcome),
     })
   }
@@ -127,6 +127,7 @@ function projectWorkflow(
 }
 
 function updateAgentStart(state: WorkflowState, data: ToolWorkflowAgentStartData): WorkflowState {
+  if (state.stopReason !== undefined || state.members.some(member => member.seq === data.seq)) return state
   const member: WorkflowMemberState = {
     seq: data.seq,
     label: data.label,
@@ -139,7 +140,7 @@ function updateAgentStart(state: WorkflowState, data: ToolWorkflowAgentStartData
 function updateAgentEnd(state: WorkflowState, data: ToolWorkflowAgentEndData): WorkflowState {
   return {
     ...state,
-    members: state.members.map(member => member.seq === data.seq
+    members: state.members.map(member => member.seq === data.seq && member.outcome === undefined
       ? { ...member, outcome: data.outcome }
       : member),
   }
@@ -172,6 +173,7 @@ export const workflowRunDefinition: ConversationNodeDefinition<WorkflowState> = 
       return updateAgentEnd(context.state, match.event.data)
     }
     if (match.event.type === 'tool-workflow/run-end') {
+      if (context.state.stopReason !== undefined) return context.state
       return { ...context.state, stopReason: match.event.data.stopReason }
     }
     return context.state

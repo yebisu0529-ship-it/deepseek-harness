@@ -32,6 +32,15 @@ import {
 } from '../src/client/workflow-definition.ts'
 import { apply as applyNode } from '../src/index.ts'
 import type {} from '../src/client/index.ts'
+import { WorkflowBoard } from '../src/client/WorkflowBoard.tsx'
+import { WorkflowBoardTab, type WorkflowBoardTabProps } from '../src/client/WorkflowBoardTab.tsx'
+import { createWorkflowBoardStore } from '../src/client/board-store.ts'
+import { en } from '../src/client/locales.ts'
+import Loader from '@deepseek-ai/cordis-plugin-loader'
+import Include from '@deepseek-ai/cordis-plugin-include'
+import { SidebarRightTabRegistry } from '../../ui-sidebar-right/src/client/tab-registry.ts'
+import { resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
 
 // Every session-scope fixture carries the resource hook the resources plugin merges into GlobalStandardProps.
 const useResource = (() => ({ status: 'none' as const, value: undefined, failure: undefined, reload: () => {} })) as GlobalStandardProps['useResource']
@@ -344,6 +353,9 @@ function panelProps(data: WorkflowRunChatData, sessions = listState(), openSessi
     renderMessageImages: () => null,
     fileMentions: () => undefined,
     openSession,
+    openBoard: vi.fn(),
+    useStore: selector => selector({ selectedKey: null }),
+    actions: { select: vi.fn() },
     t: makeTranslate(zh),
   }
 }
@@ -898,7 +910,230 @@ describe('WorkflowRunPanel', () => {
   })
 })
 
+describe('workflow board durable and live inputs', () => {
+  it('recovers a rejected raw live reversal through the existing ordered reconnect window', () => {
+    const events = completeEvents()
+    const live = assembler(events.slice(0, 5))
+    live.append(events[6]!)
+    expect(() => live.append(events[5]!)).toThrow('non-appended Match')
+    live.replaceWindow([...events].reverse(), false)
+    live.flush()
+    expect(workflowData(live)).toEqual(workflowData(assembler(events)))
+  })
+
+  it('replays a reversed persisted window and reconnects to the same two-member board', () => {
+    const events = completeEvents()
+    const expected = workflowData(assembler(events))
+    expect(workflowData(assembler([...events].reverse()))).toEqual(expected)
+    const live = assembler(events.slice(0, 3))
+    for (const event of events.slice(3)) {
+      live.append(event)
+      live.append(event)
+    }
+    live.flush()
+    expect(workflowData(live)).toEqual(expected)
+    live.replaceWindow(events, false)
+    live.flush()
+    expect(workflowData(live)).toEqual(expected)
+  })
+
+  it('keeps one card per run/member and does not reopen terminal state on delayed events', () => {
+    const events = completeEvents()
+    const live = assembler(events)
+    live.append(at(11, 'tool-workflow/agent-start', {
+      runId: 'run-1', seq: 1, label: 'duplicate', phase: 'wrong', childId: 'foreign',
+    }))
+    live.append(at(12, 'tool-workflow/agent-end', { runId: 'run-1', seq: 1, outcome: 'failed' }))
+    live.append(at(13, 'tool-workflow/run-end', { runId: 'run-1', stopReason: 'completed' }))
+    live.append(at(14, 'tool-workflow/agent-start', { runId: 'run-1', seq: 3, label: 'too late', childId: 'late' }))
+    live.flush()
+    expect(workflowData(live)).toEqual(workflowData(assembler(events)))
+    const duringRun = assembler(events.slice(0, 5))
+    duringRun.append(at(6, 'tool-workflow/agent-start', {
+      runId: 'run-1', seq: 1, label: 'duplicate', childId: 'foreign',
+    }))
+    duringRun.flush()
+    expect(workflowData(duringRun)?.phases.flatMap(value => value.members)).toHaveLength(2)
+  })
+
+  it.each(['completed', 'cancelled', 'error'])('shows a missing member ending as interrupted after run %s', (stopReason) => {
+    const live = assembler(completeEvents().slice(0, 5))
+    live.append(at(6, 'tool-workflow/agent-end', { runId: 'run-1', seq: 1, outcome: 'completed' }))
+    live.append(at(7, 'tool-workflow/run-end', { runId: 'run-1', stopReason }))
+    live.flush()
+    expect(workflowData(live)?.phases.flatMap(value => value.members).map(member => member.status))
+      .toEqual(['completed', 'interrupted'])
+    live.append(at(8, 'tool-workflow/agent-end', { runId: 'run-1', seq: 2, outcome: 'cancelled' }))
+    live.flush()
+    expect(workflowData(live)?.phases[1]?.members[0]?.status).toBe('cancelled')
+  })
+
+  it('separates the same member sequence across runs', () => {
+    const live = assembler([
+      at(1, 'tool-workflow/run-start', { runId: 'a', name: 'first' }),
+      at(2, 'tool-workflow/agent-start', { runId: 'a', seq: 1, label: 'A', childId: 'a-child' }),
+      at(3, 'tool-workflow/run-start', { runId: 'b', name: 'second' }),
+      at(4, 'tool-workflow/agent-start', { runId: 'b', seq: 1, label: 'B', childId: 'b-child' }),
+      at(5, 'tool-workflow/agent-end', { runId: 'b', seq: 1, outcome: 'failed' }),
+    ])
+    const nodes = [...(live.snapshot('chat') as ChatSnapshot).nodes.values()]
+    expect(nodes.map(value => [value.id, (value.data as WorkflowRunChatData).phases[0]?.members[0]?.status]))
+      .toEqual([['a', 'running'], ['b', 'failed']])
+  })
+})
+
+describe('read-only workflow board', () => {
+  const englishProps = (data: WorkflowRunChatData, sessions = listState(), openSession = vi.fn()) => ({
+    ...panelProps(data, sessions, openSession), runId: 'run-1', data, t: makeTranslate(en),
+  })
+
+  it('shows recorded phases, stable IDs, exact started counts and escaped arbitrary labels', () => {
+    const data = workflowData(assembler(completeEvents()))!
+    const malicious = '<img src=x onerror=alert(1)> & "member"'
+    const input = { ...data, phases: [
+      phase({ members: [{ seq: 1, label: malicious, childId: CHILD_ID, status: 'running' }] }),
+      phase({ key: 'value:0:', phase: '', members: [{ seq: 2, label: 'done', childId: SECOND_ID, status: 'completed' }] }),
+    ] }
+    const view = render(<WorkflowBoard {...englishProps(input)} />)
+    expect(screen.getByText(malicious)).toBeTruthy()
+    expect(view.container.querySelector('img')).toBeNull()
+    expect(screen.getByText('Unphased')).toBeTruthy()
+    expect(screen.getByText('Empty phase name')).toBeTruthy()
+    expect(screen.getByRole('progressbar').getAttribute('value')).toBe('1')
+    expect(screen.getByRole('progressbar').getAttribute('max')).toBe('2')
+    expect([...view.container.querySelectorAll('[data-board-member]')].map(value => value.getAttribute('data-board-member')))
+      .toEqual(['5:run-1:1', '5:run-1:2'])
+    expect(view.container.querySelectorAll('[data-board-status]')).toHaveLength(5)
+    expect(screen.queryByText(/queued|artifact|7 tasks|4 agents/i)).toBeNull()
+  })
+
+  it('updates columns live and preserves recorded failure and cancellation after a remount', () => {
+    const live = workflowData(assembler(completeEvents().slice(0, 5)))!
+    const view = render(<WorkflowBoard {...englishProps(live)} />)
+    expect(view.container.querySelector('[data-board-status="running"]')?.querySelectorAll('article')).toHaveLength(2)
+    const settled = workflowData(assembler(completeEvents()))!
+    view.rerender(<WorkflowBoard {...englishProps(settled)} />)
+    expect(view.container.querySelector('[data-board-status="completed"]')?.querySelectorAll('article')).toHaveLength(1)
+    expect(view.container.querySelector('[data-board-status="failed"]')?.querySelectorAll('article')).toHaveLength(1)
+    expect(view.container.querySelector('[data-board-status="running"]')?.querySelectorAll('article')).toHaveLength(0)
+    view.unmount()
+    const restored = render(<WorkflowBoard {...englishProps(settled)} />)
+    expect([...restored.container.querySelectorAll('[data-board-status]')].map(column => column.textContent))
+      .toMatchInlineSnapshot(`
+        [
+          "Running 0",
+          "Completed 1MemberfirstPhaseEmpty phase name",
+          "Failed 1MembersecondPhaseUnphased",
+          "Cancelled 0",
+          "Interrupted 0",
+        ]
+      `)
+  })
+
+  it('opens only a catalog-owned running member with the canonical one-shot target', () => {
+    const data: WorkflowRunChatData = { name: 'audit', status: 'running', phases: [phase()] }
+    const open = vi.fn()
+    const view = render(<WorkflowBoard {...englishProps(data, listState(), open)} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Open worker' }))
+    expect(open).toHaveBeenCalledExactlyOnceWith({ parentSessionId: PARENT_ID, childSessionId: CHILD_ID, mode: 'one-shot' })
+    view.rerender(<WorkflowBoard {...englishProps(data, listState({ projectionsBySession: {} }), open)} />)
+    expect(screen.queryByRole('button')).toBeNull()
+    view.rerender(<WorkflowBoard {...englishProps(data, listState({ byId: { [CHILD_ID]: { ...listState().byId[CHILD_ID]!, running: false } } }), open)} />)
+    expect(screen.queryByRole('button')).toBeNull()
+    view.rerender(<WorkflowBoard {...englishProps({ ...data, phases: [phase({ members: [{ seq: 1, label: 'worker', childId: CHILD_ID, status: 'completed' }] })] }, listState(), open)} />)
+    expect(screen.queryByRole('button')).toBeNull()
+    expect(open).toHaveBeenCalledTimes(1)
+  })
+
+  it('provides a collapsible in-chat board and opens the selected run in the sidebar', () => {
+    const props = { ...panelProps(workflowData(assembler(completeEvents()))!), t: makeTranslate(en) }
+    const view = render(<WorkflowRunPanel {...props} />)
+    expect(view.container.querySelector('[data-workflow-board]')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Workflow board' }))
+    expect(view.container.querySelector('[data-workflow-board]')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Open in sidebar' }))
+    expect(props.actions.select).toHaveBeenCalledExactlyOnceWith(props.node.key)
+    expect(props.openBoard).toHaveBeenCalledTimes(1)
+    fireEvent.click(screen.getByRole('button', { name: 'Workflow board' }))
+    expect(view.container.querySelector('[data-workflow-board]')).toBeNull()
+  })
+
+  it('restores only a selected identity per Session and reads current facts from a keyed source', () => {
+    const first = createWorkflowBoardStore().create('board-test-parent')
+    first.actions.select('restored-key')
+    const restored = createWorkflowBoardStore().create('board-test-parent')
+    expect(restored.store.getSnapshot()).toEqual({ selectedKey: 'restored-key' })
+    expect(createWorkflowBoardStore().create('other-parent').store.getSnapshot()).toEqual({ selectedKey: null })
+    const data = workflowData(assembler(completeEvents()))!
+    const source = createSnapshotStore<WorkflowRunPanelProps['node'] | undefined>(node(data))
+    const props: WorkflowBoardTabProps = { ...englishProps(data),
+      actions: restored.actions,
+      useStore: selector => selector(restored.store.getSnapshot()),
+      useChat: selector => selector({ ...panelChat, nodes: { ...panelChat.nodes, source: () => source } }),
+      useTabInfo: () => { throw new Error('unused') },
+    }
+    // Runtime supplies the remaining tab hooks, unused by this read-only body.
+    const view = render(<WorkflowBoardTab {...props} />)
+    expect(screen.getByText('Completed 1 of 2 started members')).toBeTruthy()
+    view.unmount()
+    const missing: WorkflowBoardTabProps = { ...props, useChat: selector => selector(panelChat) }
+    render(<WorkflowBoardTab {...missing} />)
+    expect(screen.getByText(/selected record may not be loaded/)).toBeTruthy()
+    localStorage.removeItem('dsh:workflow-board:board-test-parent')
+  })
+})
+
 describe('plugin lifecycle', () => {
+  it('loads the production client plugin from a test-only YAML composition', async () => {
+    const ctx = new Context()
+    const open = vi.fn()
+    const errors: unknown[] = []
+    ctx.logger.exporter({ levels: { default: 3 }, export: message => { if (message.type === 'error') errors.push(...message.args) } })
+    try {
+      await ctx.plugin(SlotRegistry).await()
+      await ctx.plugin(Loader).await()
+      ctx.loader.builtins.include = Include
+      ctx.loader.builtins['board-fixture-services'] = { inject: ['slots'], apply: (scope: Context) => {
+        scope.provide('connection', { api: { settings: {} }, isLoopback: false } as never)
+        scope.provide('remote', { $on: () => () => {} } as never)
+        scope.provide('configForms', { developerTools: { enabled: createSnapshotStore(true) }, get: () => stubConfigForm().scope } as never)
+        scope.provide('sessions', new TestSessions(async action => { await action() }, scope))
+        scope.provide('uiWorkspace', { openSession: vi.fn() } as never)
+        scope.provide('sidebarRight', { openTabIn: open } as never)
+        scope.provide('sidebarRightTabs', new SidebarRightTabRegistry(scope))
+        new UiConversation(scope, scope.get('sessions')!)
+        scope.slots.register({ name: 'root', children: {
+          'conversation.chat.node': { kind: 'keyed', scope: 'session' },
+          'sidebar.right.pane.tab': { kind: 'keyed', scope: 'session' },
+          'sidebar.right.pane.tab.title': { kind: 'keyed', scope: 'session' },
+        } } as never, () => null)
+      } }
+      ctx.loader.builtins['board-fixture-locale'] = { inject: localeInject, apply: applyLocale }
+      ctx.loader.builtins['board-production-client'] = { inject, apply }
+      await ctx.loader.create({ name: 'cordis:include', config: {
+        path: pathToFileURL(resolve('packages/client/ui-workflow-run/tests/fixtures/board-loader.yml')).href,
+      } })
+      await ctx.loader.await()
+      expect(errors).toEqual([])
+      expect(ctx.get('uiConversation')?.events.entries().map(entry => entry.kind)).toEqual(['workflow-run'])
+      expect(ctx.get('sidebarRightTabs')?.get('workflow-board')?.id).toBe('@deepseek-ai/dsh-client-ui-workflow-run')
+      const chat = ctx.slots.entries('conversation.chat.node')[0]!
+      const sidebar = ctx.slots.entries('sidebar.right.pane.tab')[0]!
+      expect(chat.store).toBe(sidebar.store)
+      const navigation = (chat.inject as (id: SessionId) => Record<string, unknown>)(PARENT_ID)
+      if (typeof navigation.openBoard !== 'function') throw new Error('board opener missing')
+      navigation.openBoard()
+      expect(open).toHaveBeenCalledExactlyOnceWith(PARENT_ID, 'workflow-board')
+      const data = workflowData(assembler(completeEvents()))!
+      const view = render(<WorkflowRunPanel {...panelProps(data)} t={makeTranslate(en)} />)
+      fireEvent.click(screen.getByRole('button', { name: 'Workflow board' }))
+      expect(view.container.querySelectorAll('[data-board-member]')).toHaveLength(2)
+    } finally {
+      cleanup()
+      await ctx.fiber.dispose()
+    }
+  })
+
   it('registers and removes the Definition and keyed renderer with its fiber', async () => {
     const ctx = new Context()
     await ctx.plugin(SlotRegistry).await()
@@ -909,16 +1144,28 @@ describe('plugin lifecycle', () => {
     ctx.provide('sessions', sessions)
     const openSession = vi.fn(async () => {})
     ctx.provide('uiWorkspace', { openSession } as never)
+    const tabTypes = new Map<string, object>()
+    ctx.provide('sidebarRight', { openTabIn: vi.fn() } as never)
+    ctx.provide('sidebarRightTabs', { register: (definition: { id: string }) => {
+      tabTypes.set(definition.id, definition)
+      return () => { tabTypes.delete(definition.id) }
+    } } as never)
     const conversationEvents = new UiConversation(ctx, ctx.sessions).events
     ctx.slots.register({
       name: 'root',
-      children: { 'conversation.chat.node': { kind: 'keyed', scope: 'session' } },
+      children: {
+        'conversation.chat.node': { kind: 'keyed', scope: 'session' },
+        'sidebar.right.pane.tab': { kind: 'keyed', scope: 'session' },
+        'sidebar.right.pane.tab.title': { kind: 'keyed', scope: 'session' },
+      },
     } as never, () => null)
     await ctx.plugin({ inject: localeInject, apply: applyLocale }).await()
     const fiber = ctx.plugin({ inject: [...inject], apply })
     await fiber.await()
     expect(conversationEvents.entries().map(entry => entry.kind)).toEqual(['workflow-run'])
     expect(ctx.slots.entries('conversation.chat.node')).toHaveLength(1)
+    expect(tabTypes.size).toBe(1)
+    expect(ctx.slots.entries('sidebar.right.pane.tab')).toHaveLength(1)
     const entry = ctx.slots.entries('conversation.chat.node')[0]!
     const face = entry.inject?.() as unknown as WorkflowRunInjected
     face.openSession(CHILD_ID)
@@ -926,6 +1173,8 @@ describe('plugin lifecycle', () => {
     await fiber.dispose()
     expect(conversationEvents.entries()).toEqual([])
     expect(ctx.slots.entries('conversation.chat.node')).toEqual([])
+    expect(tabTypes.size).toBe(0)
+    expect(ctx.slots.entries('sidebar.right.pane.tab')).toEqual([])
 
     const replacement = ctx.plugin({ inject: [...inject], apply })
     await replacement.await()

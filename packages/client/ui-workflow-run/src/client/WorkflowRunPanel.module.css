@@ -3,6 +3,14 @@
   min-width: 0;
 }
 
+.boardToolbar {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 4px;
+  margin-bottom: 4px;
+}
+
 .runHeader {
   box-sizing: border-box;
   display: flex;

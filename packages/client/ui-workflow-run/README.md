@@ -27,6 +27,8 @@ Use `dsh-client-ui-workflow-run` to inspect each durable top-level workflow run 
 
 A top-level workflow run through `dsh-tool-workflow` appears in the conversation as its own node: expand the run to see its phases, and expand a phase to see its members. Phase groups come only from members that started, and settlement changes status without removing or reordering members.
 
+The Workflow board action opens a read-only in-chat board; Open in sidebar selects the same run in the existing right sidebar. Columns show running, completed, failed, cancelled, and interrupted members, keyed by run identity and member sequence. Progress counts completed members against members that actually started. Member labels and exact phase identities come from durable records; no model identity, queued work, task count, result, log, or artifact is inferred. Only the selected run key is persisted per Session; reload reads current facts from its keyed Chat source. A record outside the loaded history window shows an empty state until the card is loaded.
+
 ### Navigating the node
 
 The run uses a 32-pixel row with persistent chevrons, an inline state dot, and status text; phases use disclosure rows with title and member count in the main area and a fixed aggregate-status tail; members use a 16-pixel dot slot, a truncating name area, and a fixed status column. Opening a member's child Session requires both member and child to be running, and the child must belong to the current Session's direct-child catalog. Child activity uses the unified UI status, falling back to the Session summary when unknown. Session summaries do not establish membership; absent, wrong-parent, or terminal catalog entries remain non-interactive.
